@@ -50,10 +50,29 @@ def main():
     print('='*60)
 
     successful = sum(1 for r in results if r['success'])
+    identified = sum(1 for r in results if r['success'] and
+                    r['result']['identification'].get('status') == 'identified')
+
     print(f"Successfully processed: {successful}/{len(results)} images")
+    print(f"Successfully identified: {identified}/{successful} cards")
+
+    if identified > 0:
+        print(f"\n{'='*60}")
+        print("IDENTIFIED CARDS")
+        print('='*60)
+
+        for r in results:
+            if r['success'] and r['result']['identification'].get('status') == 'identified':
+                ident = r['result']['identification']
+                conf = ident.get('confidence', 0)
+                print(f"\n{r['file']}:")
+                print(f"  → {ident.get('card_name')} (Confidence: {conf:.2%})")
+                print(f"    Type: {ident.get('card_type')}")
+                print(f"    ID: {ident.get('card_id')}")
 
     if output_dir and os.path.exists(output_dir):
-        print(f"\nProcessed images saved to: {output_dir}/")
+        print(f"\n{'='*60}")
+        print(f"Processed images saved to: {output_dir}/")
 
     return 0
 

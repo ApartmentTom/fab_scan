@@ -8,6 +8,9 @@ import numpy as np
 from PIL import Image
 import sys
 import os
+import requests
+import re
+from difflib import SequenceMatcher
 
 
 class CardScanner:
@@ -15,6 +18,7 @@ class CardScanner:
 
     def __init__(self):
         self.min_card_area = 50000  # Minimum area for card detection
+        self.api_base_url = "https://api.cardvault.fabtcg.com/carddb/api/v1/advanced-search/"
 
     def load_image(self, image_path):
         """Load an image from file"""
@@ -130,22 +134,161 @@ class CardScanner:
 
         return sharpened
 
-    def identify_card(self, card_image):
-        """Identify the card from the image"""
-        # For now, return basic image statistics
-        # This is where you would implement:
-        # - OCR for text extraction
-        # - Feature matching against a card database
-        # - API calls to card databases
+    def extract_text_ocr(self, card_image):
+        """Extract text from card image using OCR"""
+        try:
+            import pytesseract
+        except ImportError:
+            print("Warning: pytesseract not available, skipping OCR")
+            return ""
 
-        height, width = card_image.shape[:2]
-        avg_color = cv2.mean(card_image)[:3]
+        # Convert to PIL Image
+        rgb_image = cv2.cvtColor(card_image, cv2.COLOR_BGR2RGB)
+        pil_image = Image.fromarray(rgb_image)
+
+        # Extract text - try with different languages
+        try:
+            # Try English first
+            text_en = pytesseract.image_to_string(pil_image, lang='eng')
+
+            # Try Japanese if available
+            try:
+                text_ja = pytesseract.image_to_string(pil_image, lang='jpn')
+                text = text_en + "\n" + text_ja
+            except:
+                text = text_en
+
+        except Exception as e:
+            print(f"OCR error: {e}")
+            return ""
+
+        # Clean up text
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text
+
+    def search_card_api(self, query_text):
+        """Search for card using the Card Vault API"""
+        if not query_text:
+            return []
+
+        # Extract potential card name keywords from text
+        # Remove common words and keep significant terms
+        words = query_text.split()
+        keywords = [w for w in words if len(w) >= 3][:5]  # Take first 5 significant words
+
+        results = []
+
+        # Try searching with different keyword combinations
+        search_terms = []
+        if keywords:
+            search_terms.append(' '.join(keywords[:2]))  # First 2 words
+            if len(keywords) >= 1:
+                search_terms.append(keywords[0])  # Just first word
+
+        for search_term in search_terms:
+            try:
+                response = requests.get(
+                    self.api_base_url,
+                    params={'q': search_term},
+                    timeout=10
+                )
+
+                if response.status_code == 200:
+                    data = response.json()
+                    if data.get('results'):
+                        results.extend(data['results'][:10])  # Get top 10 results
+                        if len(results) >= 5:  # Stop if we have enough results
+                            break
+
+            except Exception as e:
+                print(f"API search error: {e}")
+                continue
+
+        return results
+
+    def find_best_match(self, ocr_text, api_results):
+        """Find the best matching card from API results"""
+        if not api_results:
+            return None
+
+        best_match = None
+        best_score = 0
+
+        ocr_lower = ocr_text.lower()
+
+        for card in api_results:
+            card_name = card.get('printed_name', '')
+            card_text = card.get('printed_rules_text', '')
+            card_type = card.get('printed_typebox', '')
+
+            # Calculate similarity score
+            name_similarity = SequenceMatcher(None, ocr_lower, card_name.lower()).ratio()
+
+            # Check if card name appears in OCR text
+            name_in_text = 1.0 if card_name.lower() in ocr_lower else 0.0
+
+            # Combined score
+            score = (name_similarity * 0.5) + (name_in_text * 0.5)
+
+            if score > best_score:
+                best_score = score
+                best_match = card
 
         return {
-            'dimensions': (width, height),
-            'avg_color': avg_color,
-            'status': 'detected'
+            'card': best_match,
+            'confidence': best_score
         }
+
+    def identify_card(self, card_image):
+        """Identify the card from the image using OCR and API"""
+        height, width = card_image.shape[:2]
+
+        print("Extracting text with OCR...")
+        ocr_text = self.extract_text_ocr(card_image)
+
+        if ocr_text:
+            print(f"Extracted text: {ocr_text[:100]}...")  # Show first 100 chars
+        else:
+            print("No text extracted from image")
+
+        print("Searching Card Vault API...")
+        api_results = self.search_card_api(ocr_text)
+
+        if api_results:
+            print(f"Found {len(api_results)} potential matches")
+        else:
+            print("No matches found in API")
+
+        # Find best match
+        match = self.find_best_match(ocr_text, api_results)
+
+        result = {
+            'dimensions': (width, height),
+            'ocr_text': ocr_text,
+            'api_results_count': len(api_results),
+        }
+
+        if match and match['card']:
+            card = match['card']
+            result.update({
+                'status': 'identified',
+                'confidence': match['confidence'],
+                'card_name': card.get('printed_name'),
+                'card_type': card.get('printed_typebox'),
+                'card_id': card.get('card_id'),
+                'print_id': card.get('print_id'),
+                'pitch': card.get('printed_pitch'),
+                'cost': card.get('printed_cost'),
+                'power': card.get('printed_power'),
+                'defense': card.get('printed_defense'),
+                'artist': card.get('printed_artist'),
+                'rules_text': card.get('printed_rules_text', '')[:200],  # First 200 chars
+                'image_url': card.get('faces', [{}])[0].get('image', {}).get('normal', '') if card.get('faces') else ''
+            })
+        else:
+            result['status'] = 'detected_but_not_identified'
+
+        return result
 
     def scan(self, image_path, output_dir=None):
         """Main scanning pipeline"""
@@ -200,13 +343,45 @@ def main():
 
     try:
         result = scanner.scan(image_path, output_dir)
-        print("\n" + "="*50)
+        print("\n" + "="*60)
         print("SCAN COMPLETE")
-        print("="*50)
-        print(f"Identification: {result['identification']}")
+        print("="*60)
+
+        identification = result['identification']
+
+        if identification['status'] == 'identified':
+            print(f"\n✓ CARD IDENTIFIED (Confidence: {identification['confidence']:.2%})")
+            print(f"\nName:       {identification['card_name']}")
+            print(f"Type:       {identification['card_type']}")
+            print(f"Card ID:    {identification['card_id']}")
+            print(f"Print ID:   {identification['print_id']}")
+
+            if identification.get('pitch'):
+                print(f"Pitch:      {identification['pitch']}")
+            if identification.get('cost'):
+                print(f"Cost:       {identification['cost']}")
+            if identification.get('power'):
+                print(f"Power:      {identification['power']}")
+            if identification.get('defense'):
+                print(f"Defense:    {identification['defense']}")
+            if identification.get('artist'):
+                print(f"Artist:     {identification['artist']}")
+
+            if identification.get('rules_text'):
+                print(f"\nRules Text (excerpt):\n{identification['rules_text']}")
+
+            if identification.get('image_url'):
+                print(f"\nCard Image: {identification['image_url']}")
+
+        else:
+            print(f"\nStatus: {identification['status']}")
+            print(f"OCR extracted {len(identification.get('ocr_text', ''))} characters")
+            print(f"Found {identification.get('api_results_count', 0)} API results")
 
     except Exception as e:
         print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
         return 1
 
     return 0
