@@ -4,6 +4,7 @@ A Python-based card scanning and identification system for Flesh and Blood TCG c
 
 ## Features
 
+- **Live Webcam Capture**: Real-time card capture with alignment feedback and auto-capture
 - **Card Detection**: Automatic card boundary detection using OpenCV contour detection
 - **Image Enhancement**: Advanced preprocessing with CLAHE contrast enhancement and sharpening
 - **OCR Text Extraction**: Extracts text from cards using Tesseract OCR (supports English and Japanese)
@@ -31,8 +32,38 @@ pip install -r requirements.txt
 
 ## Usage
 
-### Scan a Single Card
+### Method 1: Webcam Capture (Recommended)
 
+**Best for:** Capturing high-quality images for accurate identification
+
+1. **Set up your capture station** (see [WEBCAM_SETUP.md](WEBCAM_SETUP.md))
+   - Position webcam 12-18 inches above a white surface
+   - Ensure even lighting from both sides
+   - Camera should point straight down (90° angle)
+
+2. **Start the webcam capture**:
+```bash
+python webcam_capture.py
+```
+
+3. **Capture cards**:
+   - Place card in view, align with target rectangle
+   - Auto-capture triggers when card is properly positioned
+   - Or press SPACEBAR for manual capture
+   - Press Q to quit
+
+4. **Process captured cards**:
+```bash
+python process_captured_cards.py
+```
+
+This will identify all cards captured during your session.
+
+### Method 2: Scan Existing Images
+
+**Best for:** Processing photos you already have
+
+#### Single Card:
 ```bash
 python scan_card.py <image_path> [output_dir]
 ```
@@ -42,13 +73,12 @@ Example:
 python scan_card.py "Screenshot 2025-05-11 22-15-18.png" output
 ```
 
-### Batch Process All Images
-
+#### Batch Process:
 ```bash
 python test_all_cards.py
 ```
 
-This will process all PNG images in the current directory and save enhanced images to the `output/` folder.
+This will process all PNG images in the current directory.
 
 ## How It Works
 
@@ -66,11 +96,21 @@ The scanner uses the official Flesh and Blood Card Vault API:
 - **Search**: Supports keyword-based card searching
 - **Results**: Returns comprehensive card data including stats, images, and metadata
 
+## Tips for Best Results
+
+- ✓ **Use the webcam capture system** - provides consistent, high-quality images
+- ✓ **Proper lighting** - even lighting from multiple angles eliminates shadows
+- ✓ **90° camera angle** - camera directly overhead (not at an angle)
+- ✓ **Remove from sleeves** - reduces glare and improves OCR accuracy
+- ✓ **White background** - increases contrast for better card detection
+- ✓ **Hold still** - let auto-capture trigger when card is perfectly aligned
+
 ## Limitations
 
-- OCR accuracy depends on image quality and lighting
+- OCR accuracy depends on image quality, lighting, and camera angle
 - Japanese cards may have lower identification rates when matched against English API
-- Best results with well-lit, clear images
+- Print ID extraction works best with clear, overhead photos
+- Cards at angles or with poor lighting may not be identified correctly
 
 ## Test Images
 

@@ -25,8 +25,13 @@ venv/
 env/
 ENV/
 
-# Output directory
+# Output directories
 output/
+captured_cards/
+captured_cards_processed/
+
+# Debug images
+debug_*.png
 
 # IDE
 .vscode/
