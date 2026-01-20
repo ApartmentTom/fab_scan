@@ -134,6 +134,162 @@ class CardScanner:
 
         return sharpened
 
+    def detect_card_boundaries(self, card_image):
+        """Detect the actual card boundaries within the image using edge detection"""
+        # Convert to grayscale
+        gray = cv2.cvtColor(card_image, cv2.COLOR_BGR2GRAY)
+
+        # Apply Gaussian blur
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+
+        # Edge detection
+        edges = cv2.Canny(blurred, 50, 150)
+
+        # Find contours
+        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        if not contours:
+            # If no contours found, return None (will use full image)
+            return None
+
+        # Find the largest rectangular contour
+        largest_rect = None
+        max_area = 0
+
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area > 1000:  # Minimum area threshold
+                # Get bounding rectangle
+                x, y, w, h = cv2.boundingRect(contour)
+
+                # Check if it's roughly card-shaped (aspect ratio between 1.3 and 1.6)
+                aspect_ratio = h / w if w > 0 else 0
+                if 1.2 < aspect_ratio < 1.8 and area > max_area:
+                    max_area = area
+                    largest_rect = (x, y, w, h)
+
+        return largest_rect
+
+    def extract_print_id_region(self, card_image):
+        """Extract the bottom region where print ID typically appears"""
+        # Try to detect actual card boundaries
+        card_rect = self.detect_card_boundaries(card_image)
+
+        if card_rect:
+            x, y, w, h = card_rect
+            # Extract bottom 15% of the detected card
+            print_id_start = y + int(h * 0.82)
+            print_id_end = y + int(h * 0.95)
+            print_id_left = x + int(w * 0.05)
+            print_id_right = x + int(w * 0.95)
+
+            bottom_region = card_image[print_id_start:print_id_end, print_id_left:print_id_right]
+        else:
+            # Fallback to percentage-based extraction
+            height, width = card_image.shape[:2]
+            bottom_start = int(height * 0.45)
+            bottom_end = int(height * 0.55)
+            width_end = int(width * 0.5)
+            bottom_region = card_image[bottom_start:bottom_end, :width_end]
+
+        return bottom_region
+
+    def preprocess_for_print_id(self, region):
+        """Specialized preprocessing for print ID extraction"""
+        # Convert to grayscale
+        gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
+
+        # Apply bilateral filter to reduce noise while preserving edges
+        denoised = cv2.bilateralFilter(gray, 9, 75, 75)
+
+        # Apply thresholding to get black text on white background
+        _, binary = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+        # Invert if needed (we want black text on white background)
+        if np.mean(binary) < 127:
+            binary = cv2.bitwise_not(binary)
+
+        # Resize to improve OCR accuracy
+        scale_factor = 3
+        height, width = binary.shape
+        resized = cv2.resize(binary, (width * scale_factor, height * scale_factor),
+                            interpolation=cv2.INTER_CUBIC)
+
+        return resized
+
+    def extract_print_id(self, card_image):
+        """Extract print ID from card image"""
+        try:
+            import pytesseract
+        except ImportError:
+            return None
+
+        # Extract bottom region
+        bottom_region = self.extract_print_id_region(card_image)
+
+        # Save debug image (optional)
+        # cv2.imwrite('debug_print_region.png', bottom_region)
+
+        # Preprocess for better OCR
+        processed = self.preprocess_for_print_id(bottom_region)
+
+        # Convert to PIL Image
+        pil_image = Image.fromarray(processed)
+
+        # Try multiple OCR configurations for best results
+        ocr_results = []
+
+        configs = [
+            '--psm 6',  # Assume uniform block of text
+            '--psm 7',  # Treat as single text line
+            '--psm 11',  # Sparse text
+        ]
+
+        for config in configs:
+            try:
+                # Try with alphanumeric whitelist
+                config_with_whitelist = f'{config} -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-'
+                text = pytesseract.image_to_string(pil_image, lang='eng', config=config_with_whitelist)
+                if text.strip():
+                    ocr_results.append(text)
+
+                # Also try without whitelist to catch variations
+                text_no_whitelist = pytesseract.image_to_string(pil_image, lang='eng', config=config)
+                if text_no_whitelist.strip():
+                    ocr_results.append(text_no_whitelist)
+
+            except Exception as e:
+                continue
+
+        # Look for print ID patterns in all OCR results
+        # Pattern: Optional prefix, 2-4 letters, 3-4 digits
+        patterns = [
+            r'\b([A-Z]{2,4}\d{3,4})\b',  # ELE201, MST001, LORE143
+            r'\b([A-Z]-[A-Z]{2,4}\d{3,4})\b',  # U-ELE074
+            r'\b([A-Z]{2}_[A-Z]{2,4}\d{3,4})\b',  # DE_ELE201, FR_MST001
+            r'\b([A-Z]{3}\d{3})\b',  # Simplified: 3 letters + 3 digits
+        ]
+
+        for text in ocr_results:
+            # Clean up text
+            cleaned_text = text.upper().replace('O', '0').replace('I', '1')  # Common OCR mistakes
+
+            for pattern in patterns:
+                matches = re.findall(pattern, cleaned_text)
+                if matches:
+                    print_id = matches[0]
+                    print(f"Found print ID: {print_id}")
+                    return print_id
+
+        # If no pattern match but we have some alphanumeric text, return it for debugging
+        for text in ocr_results:
+            cleaned = re.sub(r'[^A-Z0-9_-]', '', text.upper().strip())
+            if 5 <= len(cleaned) <= 15:  # Reasonable length for a print ID
+                print(f"Possible print ID (no pattern match): {cleaned}")
+                return cleaned
+
+        return None
+
     def extract_text_ocr(self, card_image):
         """Extract text from card image using OCR"""
         try:
@@ -166,17 +322,40 @@ class CardScanner:
         text = re.sub(r'\s+', ' ', text).strip()
         return text
 
-    def search_card_api(self, query_text):
+    def search_card_api(self, query_text, print_id=None):
         """Search for card using the Card Vault API"""
+        results = []
+
+        # If we have a print ID, search for it first (most reliable)
+        if print_id:
+            print(f"Searching by print ID: {print_id}")
+            try:
+                response = requests.get(
+                    self.api_base_url,
+                    params={'q': print_id},
+                    timeout=10
+                )
+
+                if response.status_code == 200:
+                    data = response.json()
+                    if data.get('results'):
+                        results.extend(data['results'])
+                        # If we got results from print ID, return immediately
+                        if len(results) > 0:
+                            print(f"Found {len(results)} matches by print ID")
+                            return results
+
+            except Exception as e:
+                print(f"API search error for print ID: {e}")
+
+        # Fall back to text-based search
         if not query_text:
-            return []
+            return results
 
         # Extract potential card name keywords from text
         # Remove common words and keep significant terms
         words = query_text.split()
         keywords = [w for w in words if len(w) >= 3][:5]  # Take first 5 significant words
-
-        results = []
 
         # Try searching with different keyword combinations
         search_terms = []
@@ -243,6 +422,16 @@ class CardScanner:
         """Identify the card from the image using OCR and API"""
         height, width = card_image.shape[:2]
 
+        # Try to extract print ID first (most reliable)
+        print("Extracting print ID...")
+        print_id = self.extract_print_id(card_image)
+
+        if print_id:
+            print(f"Detected print ID: {print_id}")
+        else:
+            print("No print ID detected")
+
+        # Extract general text for fallback
         print("Extracting text with OCR...")
         ocr_text = self.extract_text_ocr(card_image)
 
@@ -251,8 +440,9 @@ class CardScanner:
         else:
             print("No text extracted from image")
 
+        # Search API with print ID (if available) and text
         print("Searching Card Vault API...")
-        api_results = self.search_card_api(ocr_text)
+        api_results = self.search_card_api(ocr_text, print_id=print_id)
 
         if api_results:
             print(f"Found {len(api_results)} potential matches")
@@ -265,6 +455,7 @@ class CardScanner:
         result = {
             'dimensions': (width, height),
             'ocr_text': ocr_text,
+            'detected_print_id': print_id,
             'api_results_count': len(api_results),
         }
 
@@ -375,6 +566,8 @@ def main():
 
         else:
             print(f"\nStatus: {identification['status']}")
+            if identification.get('detected_print_id'):
+                print(f"Detected Print ID: {identification['detected_print_id']}")
             print(f"OCR extracted {len(identification.get('ocr_text', ''))} characters")
             print(f"Found {identification.get('api_results_count', 0)} API results")
 
